@@ -669,6 +669,19 @@
   color: #27243d;
 }
 
+[data-theme="light"] .goal-status.achieved {
+  background: #e4f5ec;
+  color: #237148;
+}
+
+[data-theme="light"] .goal-card-achieved {
+  border-color: #b7dfc8;
+}
+
+[data-theme="light"] .goal-actions {
+  border-color: #e3e6ee;
+}
+
 [data-theme="light"] .report-period-caption,
 [data-theme="light"] .report-detail-row,
 [data-theme="light"] .chart-legend {

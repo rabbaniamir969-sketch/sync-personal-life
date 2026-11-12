@@ -8,7 +8,7 @@ type Transaction = { id: string; title: string; amount: number; type: "income" |
 type Debt = { id: string; title: string; amount: number; type: "utang" | "piutang"; dueDate: string; status: "Belum lunas" | "Lunas" };
 type Task = { id: string; title: string; date: string; done: boolean; priority: "Rendah" | "Sedang" | "Tinggi"; completedOn?: string };
 type Habit = { id: string; title: string; done: boolean; completedOn?: string; completionDates?: string[] };
-type Goal = { id: string; title: string; target: number; saved: number };
+type Goal = { id: string; title: string; target: number; saved: number; status?: "active" | "achieved" };
 type ProgressSnapshot = { date: string; assets: number; goalsSaved: number; goalsTarget: number; completedTasks: number; habitsCompleted: number; habitsTotal: number };
 type Reminder = { id: string; title: string; date: string };
 type NotificationCategory = "debt" | "budget" | "schedule" | "goal" | "habit" | "task";
@@ -29,7 +29,7 @@ const initial = {
   debts: [] as Debt[],
   tasks: [] as Task[],
   habits: [{ id: "h1", title: "Bangun pagi", done: false }, { id: "h2", title: "Membaca / belajar", done: false }, { id: "h3", title: "Bergerak atau olahraga", done: false }] as Habit[],
-  goals: [{ id: "g1", title: "Tabungan pribadi", target: 5000000, saved: 750000 }] as Goal[],
+  goals: [{ id: "g1", title: "Tabungan pribadi", target: 5000000, saved: 750000, status: "active" }] as Goal[],
   reminders: [] as Reminder[],
   accounts: [{ name: "Dompet", balance: 0 }, { name: "Rekening", balance: 0 }],
   budget: 1500000,
@@ -57,6 +57,10 @@ function readSecurity(): PinCredential | null {
     return null;
   }
   return null;
+}
+
+function normalizeGoals(goals: Goal[] | undefined): Goal[] {
+  return (goals ?? initial.goals).map(goal => ({ ...goal, status: goal.status ?? "active" }));
 }
 
 function randomSalt(): Uint8Array {
@@ -103,6 +107,7 @@ function readData(): DataLoadResult {
         ...initial,
         ...saved,
         habits: normalizeHabits(saved.habits, localDateKey(new Date())),
+        goals: normalizeGoals(saved.goals),
         notifications: Array.isArray(saved.notifications) ? saved.notifications : [],
         notificationSettings: { ...initial.notificationSettings, ...saved.notificationSettings },
         preferences: { ...defaultPreferences, ...saved.preferences },
@@ -146,7 +151,7 @@ function isValidDataSnapshot(value: unknown): value is Partial<Data> {
   if (!value.debts.every(item => hasStringFields(item, ["id", "title", "dueDate"]) && typeof item.amount === "number" && Number.isFinite(item.amount) && (item.type === "utang" || item.type === "piutang") && (item.status === "Lunas" || item.status === "Belum lunas"))) return false;
   if (!value.tasks.every(item => hasStringFields(item, ["id", "title", "date"]) && typeof item.done === "boolean" && (item.priority === "Rendah" || item.priority === "Sedang" || item.priority === "Tinggi") && (item.completedOn === undefined || typeof item.completedOn === "string"))) return false;
   if (Array.isArray(value.habits) && !value.habits.every(item => hasStringFields(item, ["id", "title"]) && typeof item.done === "boolean" && (item.completedOn === undefined || typeof item.completedOn === "string") && (item.completionDates === undefined || (Array.isArray(item.completionDates) && item.completionDates.every(date => typeof date === "string"))))) return false;
-  if (Array.isArray(value.goals) && !value.goals.every(item => hasStringFields(item, ["id", "title"]) && typeof item.target === "number" && Number.isFinite(item.target) && typeof item.saved === "number" && Number.isFinite(item.saved))) return false;
+  if (Array.isArray(value.goals) && !value.goals.every(item => hasStringFields(item, ["id", "title"]) && typeof item.target === "number" && Number.isFinite(item.target) && typeof item.saved === "number" && Number.isFinite(item.saved) && (item.status === undefined || item.status === "active" || item.status === "achieved"))) return false;
   if (Array.isArray(value.reminders) && !value.reminders.every(item => hasStringFields(item, ["id", "title", "date"]))) return false;
   if (Array.isArray(value.accounts) && !value.accounts.every(item => hasStringFields(item, ["name"]) && typeof item.balance === "number" && Number.isFinite(item.balance))) return false;
   if (Array.isArray(value.notifications) && !value.notifications.every(item => hasStringFields(item, ["id", "title", "message", "createdAt"]) && typeof item.read === "boolean" && ["debt", "budget", "schedule", "goal", "habit", "task"].includes(String(item.category)) && ["Tinggi", "Sedang", "Rendah"].includes(String(item.priority)))) return false;
@@ -291,8 +296,9 @@ function ProgressReport({ data, now, period, onPeriodChange }: { data: Data; now
   const previousHabitRate = habitRate(previousHabitCount, previous);
   const currentSnapshot = data.progressSnapshots.filter(snapshot => snapshot.date >= current.start && snapshot.date <= current.end).sort((a, b) => a.date.localeCompare(b.date)).at(-1);
   const previousSnapshot = data.progressSnapshots.filter(snapshot => snapshot.date >= previous.start && snapshot.date <= previous.end).sort((a, b) => a.date.localeCompare(b.date)).at(-1);
-  const liveGoalsTarget = data.goals.reduce((sum, goal) => sum + goal.target, 0);
-  const liveGoalsSaved = data.goals.reduce((sum, goal) => sum + goal.saved, 0);
+  const activeGoals = data.goals.filter(goal => goal.status !== "achieved");
+  const liveGoalsTarget = activeGoals.reduce((sum, goal) => sum + goal.target, 0);
+  const liveGoalsSaved = activeGoals.reduce((sum, goal) => sum + goal.saved, 0);
   const currentGoalRate = currentSnapshot
     ? currentSnapshot.goalsTarget > 0 ? Math.round(currentSnapshot.goalsSaved / currentSnapshot.goalsTarget * 100) : 0
     : liveGoalsTarget > 0 ? Math.round(liveGoalsSaved / liveGoalsTarget * 100) : 0;
@@ -451,7 +457,7 @@ function buildNotifications(data: Data, now: Date): AppNotification[] {
     if (unfinishedHabits.length) {
       add(`habit:${date}`, "habit", "Habit belum diselesaikan", `${unfinishedHabits.length} kebiasaan masih menunggu: ${unfinishedHabits.slice(0, 3).map(habit => habit.title).join(", ")}${unfinishedHabits.length > 3 ? ", dan lainnya" : ""}.`, "Sedang");
     }
-    const unfinishedGoals = data.goals.filter(goal => goal.saved < goal.target);
+    const unfinishedGoals = data.goals.filter(goal => goal.status !== "achieved" && goal.saved < goal.target);
     if (unfinishedGoals.length) {
       add(`goal:${date}`, "goal", "Target tabungan belum tercapai", `${unfinishedGoals.length} target masih berjalan. Target terdekat: ${unfinishedGoals[0].title} (${money(unfinishedGoals[0].saved)} dari ${money(unfinishedGoals[0].target)}).`, "Rendah");
     }
@@ -565,8 +571,8 @@ export default function App() {
     const snapshot: ProgressSnapshot = {
       date: currentDate,
       assets: currentAssetValue(data, currentDate),
-      goalsSaved: data.goals.reduce((sum, goal) => sum + goal.saved, 0),
-      goalsTarget: data.goals.reduce((sum, goal) => sum + goal.target, 0),
+      goalsSaved: data.goals.filter(goal => goal.status !== "achieved").reduce((sum, goal) => sum + goal.saved, 0),
+      goalsTarget: data.goals.filter(goal => goal.status !== "achieved").reduce((sum, goal) => sum + goal.target, 0),
       completedTasks: data.tasks.filter(task => task.done).length,
       habitsCompleted: data.habits.filter(habit => isHabitDoneToday(habit, currentDate)).length,
       habitsTotal: data.habits.length
@@ -626,6 +632,7 @@ export default function App() {
           ...initial,
           ...restored,
           habits: normalizeHabits(restored.habits, currentDate),
+          goals: normalizeGoals(restored.goals),
           notifications: Array.isArray(restored.notifications) ? restored.notifications : [],
           notificationSettings: { ...initial.notificationSettings, ...restored.notificationSettings },
           preferences: { ...defaultPreferences, ...restored.preferences }
@@ -745,6 +752,13 @@ export default function App() {
   function markAllNotificationsRead() {
     setData(current => ({ ...current, notifications: current.notifications.map(notification => ({ ...notification, read: true })) }));
   }
+  function deleteGoal(goal: Goal) {
+    if (!window.confirm(`Hapus target "${goal.title}"? Progres target ini akan dihapus dan tidak dapat dipulihkan.`)) return;
+    setData(current => ({ ...current, goals: current.goals.filter(item => item.id !== goal.id) }));
+  }
+  function setGoalStatus(id: string, status: Goal["status"]) {
+    setData(current => ({ ...current, goals: current.goals.map(goal => goal.id === id ? { ...goal, status } : goal) }));
+  }
   function sendChat() {
     const q = chat.trim(); if (!q) return;
     const lower = q.toLowerCase();
@@ -814,7 +828,7 @@ export default function App() {
         </div>
         <div className="two-col">
           <div className="panel"><div className="panel-head"><div><h3>Kebiasaan hari ini</h3><p>Bangun konsistensi setiap hari</p></div><button className="text-btn" onClick={()=>setPage("Kebiasaan")}>Semua ↗</button></div>{data.habits.map(h=>{const done=isHabitDoneToday(h,currentDate);return <label className="habit-line" key={h.id}><input type="checkbox" checked={done} onChange={e=>setData(d=>({...d,habits:d.habits.map(x=>x.id===h.id?{...x,done:e.target.checked,completedOn:e.target.checked?currentDate:undefined,completionDates:e.target.checked?[...new Set([...(x.completionDates??[]),currentDate])]:x.completionDates?.filter(date=>date!==currentDate)}:x)}))}/><span className={done?"done":""}>{h.title}</span><small>{done?"Selesai":"Belum"}</small></label>})}</div>
-          <div className="panel"><div className="panel-head"><div><h3>Target tabungan</h3><p>Terus bergerak menuju tujuanmu</p></div><button className="text-btn" onClick={()=>setPage("Target")}>Detail ↗</button></div>{data.goals.slice(0,2).map(g=><div className="goal-mini" key={g.id}><div><b>{g.title}</b><span>{money(g.saved)} / {money(g.target)}</span></div><div className="budget-track"><div style={{width:`${Math.min(100,g.target?g.saved/g.target*100:0)}%`}}/></div></div>)}{data.goals.length===0&&<Empty text="Belum ada target tabungan."/>}</div>
+          <div className="panel"><div className="panel-head"><div><h3>Target tabungan</h3><p>Terus bergerak menuju tujuanmu</p></div><button className="text-btn" onClick={()=>setPage("Target")}>Detail ↗</button></div>{data.goals.filter(g=>g.status!=="achieved").slice(0,2).map(g=><div className="goal-mini" key={g.id}><div><b>{g.title}</b><span>{money(g.saved)} / {money(g.target)}</span></div><div className="budget-track"><div style={{width:`${Math.min(100,g.target?g.saved/g.target*100:0)}%`}}/></div></div>)}{data.goals.every(g=>g.status==="achieved")&&<Empty text="Belum ada target aktif. Buat target baru untuk mulai melacak progres."/>}</div>
         </div>
         <div className="panel dashboard-agenda"><div className="panel-head"><div><h3>Agenda mendatang</h3><p>Tugas dan pengingat terdekat.</p></div><button className="text-btn" onClick={()=>setPage("Kalender")}>Buka kalender ↗</button></div>{dashboardAgenda.length ? dashboardAgenda.map(item=><div className="task-line" key={item.id}><span className="calendar-date">{item.label==="Tugas"?"✓":"◷"}</span><div><b>{item.title}</b><small>{item.label} · {new Date(item.date).toLocaleString("id-ID",{dateStyle:"medium",timeStyle:item.label==="Tugas"?undefined:"short"})}</small></div></div>) : <Empty text="Belum ada tugas atau pengingat mendatang."/>}</div>
       </section>}
@@ -839,7 +853,7 @@ export default function App() {
 
       {page === "Kebiasaan" && <section className="content"><div className="section-actions"><div><h2>Habit tracker</h2><p>Pantau kebiasaan yang ingin kamu bangun.</p></div><button className="primary" onClick={()=>setShowHabitForm(true)}>＋ Tambah kebiasaan</button></div><div className="panel">{data.habits.map(h=>{const done=isHabitDoneToday(h,currentDate);return <label className="habit-line roomy" key={h.id}><input type="checkbox" checked={done} onChange={e=>setData(d=>({...d,habits:d.habits.map(x=>x.id===h.id?{...x,done:e.target.checked,completedOn:e.target.checked?currentDate:undefined,completionDates:e.target.checked?[...new Set([...(x.completionDates??[]),currentDate])]:x.completionDates?.filter(date=>date!==currentDate)}:x)}))}/><span className={done?"done":""}>{h.title}</span><small>{done?"Selesai hari ini":"Belum dilakukan"}</small><button className="delete-btn" onClick={e=>{e.preventDefault();setData(d=>({...d,habits:d.habits.filter(x=>x.id!==h.id)}))}}>Hapus</button></label>})}{data.habits.length===0&&<Empty text="Belum ada habit. Tambahkan kebiasaan untuk mulai melacaknya."/>}</div></section>}
 
-      {page === "Target" && <section className="content"><div className="section-actions"><div><h2>Target & tabungan</h2><p>Ubah rencana menjadi progres yang terukur.</p></div><button className="primary" onClick={()=>setShowGoal(true)}>＋ Target baru</button></div><div className="goal-grid">{data.goals.length===0?<Empty text="Belum ada target tabungan. Buat target untuk mulai melacak progres."/>:data.goals.map(g=><div className="panel goal-card" key={g.id}><div className="goal-icon">◎</div><h3>{g.title}</h3><strong>{money(g.saved)}</strong><small>dari {money(g.target)}</small><div className="budget-track"><div style={{width:`${Math.min(100,g.target?g.saved/g.target*100:0)}%`}}/></div><div className="track-caption"><b>{g.target?Math.round(g.saved/g.target*100):0}% tercapai</b><button className="text-btn" onClick={()=>setGoalContributionId(g.id)}>＋ Tambah dana</button></div></div>)}</div></section>}
+      {page === "Target" && <section className="content"><div className="section-actions"><div><h2>Target & tabungan</h2><p>Ubah rencana menjadi progres yang terukur.</p></div><button className="primary" onClick={()=>setShowGoal(true)}>＋ Target baru</button></div><div className="goal-grid">{data.goals.length===0?<Empty text="Belum ada target tabungan. Buat target untuk mulai melacak progres."/>:data.goals.map(g=><div className={`panel goal-card ${g.status==="achieved"?"goal-card-achieved":""}`} key={g.id}><div className="goal-icon">{g.status==="achieved"?"✓":"◎"}</div><span className={`goal-status ${g.status==="achieved"?"achieved":""}`}>{g.status==="achieved"?"Target tercapai":"Sedang berjalan"}</span><h3>{g.title}</h3><strong>{money(g.saved)}</strong><small>dari {money(g.target)}</small><div className="budget-track"><div style={{width:`${Math.min(100,g.target?g.saved/g.target*100:0)}%`}}/></div><div className="track-caption"><b>{g.target?Math.round(g.saved/g.target*100):0}% progres</b>{g.status!=="achieved"&&<button className="text-btn" onClick={()=>setGoalContributionId(g.id)}>＋ Tambah dana</button>}</div><div className="goal-actions">{g.status==="achieved"?<button className="text-btn" onClick={()=>setGoalStatus(g.id,"active")}>Jadikan aktif</button>:<button className="text-btn" onClick={()=>setGoalStatus(g.id,"achieved")}>Tandai tercapai</button>}<button className="delete-btn" onClick={()=>deleteGoal(g)}>Hapus target</button></div></div>)}</div></section>}
 
       {page === "AI Assistant" && <section className="content assistant-layout"><div className="assistant-intro"><div className="assistant-symbol">✦</div><h2>Teman berpikir, langsung dari dashboard.</h2><p>Tanyakan ringkasan keuangan, aktivitas, atau minta saran berdasarkan data yang tersimpan di SYNC.</p><span className="tag">MODE LOKAL · TANPA API</span></div><div className="panel chat-panel"><div className="chat-messages">{messages.map((m,i)=><div key={i} className={`bubble ${m.role}`}>{m.text}</div>)}</div><div className="chat-input"><input value={chat} onChange={e=>setChat(e.target.value)} onKeyDown={e=>e.key==="Enter"&&sendChat()} placeholder="Tanyakan sesuatu tentang harimu..."/><button className="primary" onClick={sendChat}>Kirim ↑</button></div><small className="muted">Catatan: asisten awal ini menggunakan analisis lokal sederhana, bukan model AI online.</small></div></section>}
 
@@ -1120,7 +1134,7 @@ function TransactionForm({accounts,save}:{accounts:string[];save:(t:Transaction)
   return <form onSubmit={e=>{e.preventDefault();if(title.trim()&&Number(amount)>0&&accounts.includes(account))save({id:uid(),title:title.trim(),amount:Number(amount),type,category,date,account})}} className="form-grid"><label>Nama transaksi<input required value={title} onChange={e=>setTitle(e.target.value)} placeholder="Contoh: Makan siang"/></label><label>Jumlah (Rp)<input required type="number" min="1" step="1" value={amount} onChange={e=>setAmount(e.target.value)}/></label><label>Jenis<select value={type} onChange={e=>setType(e.target.value as "income"|"expense")}><option value="expense">Pengeluaran</option><option value="income">Pemasukan</option></select></label><label>Kategori<select value={category} onChange={e=>setCategory(e.target.value)}>{["Makanan","Transportasi","Belanja","Tagihan","Hiburan","Pendidikan","Gaji","Bonus","Lainnya"].map(x=><option key={x}>{x}</option>)}</select></label><label>Tanggal<input required type="date" value={date} onChange={e=>setDate(e.target.value)}/></label><label>Sumber dana<select required value={account} onChange={e=>setAccount(e.target.value)}>{accounts.map(name=><option key={name}>{name}</option>)}</select></label><button className="primary full" type="submit">Simpan transaksi</button></form>;
 }
 function TaskForm({save}:{save:(t:Task)=>void}) { const [title,setTitle]=useState("");const [date,setDate]=useState(()=>localDateKey(new Date()));const [priority,setPriority]=useState<Task["priority"]>("Sedang");return <form className="form-grid" onSubmit={e=>{e.preventDefault();save({id:uid(),title,date,priority,done:false})}}><label className="full">Nama tugas<input required value={title} onChange={e=>setTitle(e.target.value)} placeholder="Apa yang perlu diselesaikan?"/></label><label>Tanggal<input type="date" value={date} onChange={e=>setDate(e.target.value)}/></label><label>Prioritas<select value={priority} onChange={e=>setPriority(e.target.value as Task["priority"])}><option>Rendah</option><option>Sedang</option><option>Tinggi</option></select></label><button className="primary full">Simpan tugas</button></form>; }
-function GoalForm({save}:{save:(g:Goal)=>void}) {const [title,setTitle]=useState("");const [target,setTarget]=useState("");return <form className="form-grid" onSubmit={e=>{e.preventDefault();save({id:uid(),title,target:Number(target),saved:0})}}><label className="full">Nama target<input required value={title} onChange={e=>setTitle(e.target.value)} placeholder="Contoh: Laptop baru"/></label><label className="full">Jumlah target (Rp)<input required type="number" min="1" value={target} onChange={e=>setTarget(e.target.value)}/></label><button className="primary full">Buat target</button></form>; }
+function GoalForm({save}:{save:(g:Goal)=>void}) {const [title,setTitle]=useState("");const [target,setTarget]=useState("");return <form className="form-grid" onSubmit={e=>{e.preventDefault();save({id:uid(),title,target:Number(target),saved:0,status:"active"})}}><label className="full">Nama target<input required value={title} onChange={e=>setTitle(e.target.value)} placeholder="Contoh: Laptop baru"/></label><label className="full">Jumlah target (Rp)<input required type="number" min="1" value={target} onChange={e=>setTarget(e.target.value)}/></label><button className="primary full">Buat target</button></form>; }
 function GoalContributionForm({save}:{save:(amount:number)=>void}) {const [amount,setAmount]=useState("");return <form className="form-grid" onSubmit={e=>{e.preventDefault();const value=Number(amount);if(Number.isSafeInteger(value)&&value>0)save(value)}}><label className="full">Dana yang ditambahkan (Rp)<input autoFocus required type="number" min="1" step="1" value={amount} onChange={e=>setAmount(e.target.value)}/></label><button className="primary full" type="submit">Simpan kontribusi</button></form>; }
 function HabitForm({save}:{save:(title:string)=>void}) {const [title,setTitle]=useState("");return <form className="form-grid" onSubmit={e=>{e.preventDefault();if(title.trim())save(title.trim())}}><label className="full">Nama kebiasaan<input autoFocus required maxLength={80} value={title} onChange={e=>setTitle(e.target.value)} placeholder="Contoh: Membaca 15 menit"/></label><button className="primary full" type="submit">Simpan kebiasaan</button></form>; }
 function ReminderForm({save}:{save:(r:Reminder)=>void}) {const [title,setTitle]=useState("");const [date,setDate]=useState("");return <form className="form-grid" onSubmit={e=>{e.preventDefault();if(title.trim()&&date)save({id:uid(),title:title.trim(),date})}}><label className="full">Nama pengingat<input required value={title} onChange={e=>setTitle(e.target.value)} placeholder="Contoh: Bayar tagihan"/></label><label className="full">Tanggal & waktu<input required type="datetime-local" value={date} onChange={e=>setDate(e.target.value)}/></label><p className="form-note full">Pengingat muncul di kalender dan dashboard. Notifikasi browser hanya diperiksa saat SYNC terbuka; pengiriman saat aplikasi ditutup belum tersedia.</p><button className="primary full">Simpan pengingat</button></form>; }

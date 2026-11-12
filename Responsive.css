@@ -673,3 +673,50 @@
     min-height: 40px;
   }
 }
+
+.goal-card {
+  position: relative;
+}
+
+.goal-status {
+  display: inline-flex;
+  margin: 8px 0 12px;
+  padding: 5px 9px;
+  border-radius: 20px;
+  background: var(--sync-accent-soft, #9b82ff22);
+  color: var(--sync-accent, #b5a2ff);
+  font-size: 10px;
+}
+
+.goal-status.achieved {
+  background: #17372f;
+  color: #69d9ab;
+}
+
+.goal-card-achieved {
+  border-color: #315343;
+}
+
+.goal-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  border-top: 1px solid #242a3c;
+  padding-top: 8px;
+}
+
+.goal-actions .text-btn,
+.goal-actions .delete-btn {
+  min-height: 36px;
+  padding: 8px;
+}
+
+@media (max-width: 420px) {
+  .goal-actions {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 2px;
+  }
+}

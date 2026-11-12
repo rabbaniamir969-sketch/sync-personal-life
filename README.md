@@ -29,7 +29,7 @@ Workflow pada `.github/workflows/deploy.yml` membangun dan menerbitkan `dist` sa
 - Catat utang/piutang, nominal, tanggal jatuh tempo, dan status pembayarannya.
 - To-do list dan prioritas.
 - Habit tracker harian.
-- Target tabungan dan penambahan dana.
+- Target tabungan dan penambahan dana, tandai target tercapai, aktifkan kembali target, dan hapus target.
 - Agenda tugas/pengingat mendatang pada dashboard dan daftar kalender.
 - Pengingat tersimpan dan uji notifikasi browser.
 - Pusat notifikasi lintas modul dengan prioritas, riwayat, dan status baca.
