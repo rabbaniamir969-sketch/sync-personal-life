@@ -1,0 +1,6 @@
+.debt-summary .money-row{margin:8px 0 18px}
+.debt-summary .primary{font-size:10px}
+.debt-table td small{display:block}
+.debt-status{min-width:120px;padding:7px 9px;border:1px solid #55462b;border-radius:20px;background:#302819;color:#ffd27b;font-size:10px}
+.debt-status.paid{border-color:#28533f;background:#17372f;color:#69d9ab}
+@media(max-width:720px){.nav-item{width:calc(12.5% - 1px);font-size:7px}.nav-item span{font-size:16px}.debt-table{min-width:620px}}
