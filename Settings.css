@@ -258,6 +258,14 @@
   min-height: 39px;
 }
 
+.widget-settings-entry .panel-head {
+  align-items: center;
+}
+
+.widget-settings-entry .settings-help {
+  margin-bottom: 0;
+}
+
 .settings-save-button:disabled {
   cursor: wait;
   opacity: 0.7;

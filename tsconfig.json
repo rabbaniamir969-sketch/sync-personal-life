@@ -16,5 +16,5 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true
   },
-  "include": ["App.tsx", "main.tsx", "vite.config.ts"]
+  "include": ["App.tsx", "main.tsx", "vite.config.ts", "capacitor.config.ts", "widget/**/*.ts", "widget/**/*.tsx"]
 }

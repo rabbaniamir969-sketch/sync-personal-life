@@ -1,8 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { App as NativeApp } from "@capacitor/app";
+import { Capacitor } from "@capacitor/core";
+import { createExcelWorkbook } from "./excel-export";
 import "./App.css";
 import "./Debt.css";
 import "./Responsive.css";
 import "./Settings.css";
+import { DEFAULT_WIDGET_CONFIGURATION } from "./widget/snapshot";
+import { normalizeWidgetConfiguration, isValidWidgetConfiguration } from "./widget/configuration";
+import { prioritizeWidgetTasks } from "./widget/priority-engine";
+import { WidgetCustomization } from "./widget/WidgetCustomization";
+import { createWidgetSnapshot } from "./widget/snapshot";
+import { syncWidgetToNative } from "./widget/bridge";
 
 type Transaction = { id: string; title: string; amount: number; type: "income" | "expense"; category: string; date: string; account: string };
 type Debt = { id: string; title: string; amount: number; type: "utang" | "piutang"; dueDate: string; status: "Belum lunas" | "Lunas" };
@@ -36,7 +45,8 @@ const initial = {
   notifications: [] as AppNotification[],
   notificationSettings: { pushEnabled: false, reminderTime: "20:00", advanceDays: 1, budgetThreshold: 80 } as NotificationSettings,
   preferences: defaultPreferences,
-  progressSnapshots: [] as ProgressSnapshot[]
+  progressSnapshots: [] as ProgressSnapshot[],
+  widgetConfiguration: DEFAULT_WIDGET_CONFIGURATION
 };
 
 type Data = typeof initial;
@@ -111,7 +121,8 @@ function readData(): DataLoadResult {
         notifications: Array.isArray(saved.notifications) ? saved.notifications : [],
         notificationSettings: { ...initial.notificationSettings, ...saved.notificationSettings },
         preferences: { ...defaultPreferences, ...saved.preferences },
-        progressSnapshots: Array.isArray(saved.progressSnapshots) ? saved.progressSnapshots : []
+        progressSnapshots: Array.isArray(saved.progressSnapshots) ? saved.progressSnapshots : [],
+        widgetConfiguration: normalizeWidgetConfiguration(saved.widgetConfiguration)
       },
       error: ""
     };
@@ -161,6 +172,7 @@ function isValidDataSnapshot(value: unknown): value is Partial<Data> {
     if (!isRecord(settings) || typeof settings.pushEnabled !== "boolean" || typeof settings.reminderTime !== "string" || !/^([01]\d|2[0-3]):[0-5]\d$/.test(settings.reminderTime) || typeof settings.advanceDays !== "number" || !Number.isInteger(settings.advanceDays) || settings.advanceDays < 0 || settings.advanceDays > 30 || typeof settings.budgetThreshold !== "number" || !Number.isInteger(settings.budgetThreshold) || settings.budgetThreshold < 1 || settings.budgetThreshold > 100) return false;
   }
   if (value.preferences !== undefined && (!isRecord(value.preferences) || typeof value.preferences.name !== "string" || typeof value.preferences.email !== "string" || !["dark", "light"].includes(String(value.preferences.theme)) || !(String(value.preferences.accent) in ACCENTS) || typeof value.preferences.autoLockMinutes !== "number" || ![0, 1, 5, 15, 30].includes(value.preferences.autoLockMinutes) || (value.preferences.lastBackupAt !== undefined && typeof value.preferences.lastBackupAt !== "string"))) return false;
+  if (value.widgetConfiguration !== undefined && !isValidWidgetConfiguration(value.widgetConfiguration)) return false;
   return true;
 }
 
@@ -478,6 +490,7 @@ export default function App() {
   const [showDeleteConfirmation, setShowDeleteConfirmation] = useState(false);
   const [deleteConfirmation, setDeleteConfirmation] = useState("");
   const [importError, setImportError] = useState("");
+  const [widgetSyncError, setWidgetSyncError] = useState("");
   const [page, setPage] = useState("Dashboard");
   const [unreadOnly, setUnreadOnly] = useState(false);
   const [reportPeriod, setReportPeriod] = useState<ReportPeriod>("weekly");
@@ -495,6 +508,7 @@ export default function App() {
   const importRef = useRef<HTMLInputElement>(null);
   const skipNextDataSave = useRef(false);
   const preserveStoredData = useRef(Boolean(initialData.error));
+  const storageWriteSucceeded = useRef(false);
 
   useEffect(() => {
     const accent = ACCENTS[data.preferences.accent] ?? ACCENTS.purple;
@@ -529,13 +543,19 @@ export default function App() {
   useEffect(() => {
     if (skipNextDataSave.current) {
       skipNextDataSave.current = false;
+      storageWriteSucceeded.current = true;
       return;
     }
-    if (preserveStoredData.current) return;
+    if (preserveStoredData.current) {
+      storageWriteSucceeded.current = false;
+      return;
+    }
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      storageWriteSucceeded.current = true;
       setStorageError("");
     } catch (error) {
+      storageWriteSucceeded.current = false;
       console.error("Perubahan SYNC tidak dapat disimpan ke penyimpanan lokal.", error);
       setStorageError("Perubahan belum tersimpan di browser. Ekspor backup dan periksa ruang penyimpanan/perizinan browser.");
     }
@@ -568,6 +588,74 @@ export default function App() {
 
   const currentDate = localDateKey(now);
   useEffect(() => {
+    let active = true;
+    if (!Capacitor.isNativePlatform()) {
+      setWidgetSyncError("");
+      return () => { active = false; };
+    }
+    if (storageError || preserveStoredData.current || !storageWriteSucceeded.current) {
+      setWidgetSyncError("Data SYNC belum tersimpan dengan aman; widget belum diperbarui.");
+      return () => { active = false; };
+    }
+
+    const snapshot = createWidgetSnapshot(data, now);
+    syncWidgetToNative(snapshot, data.widgetConfiguration)
+      .then(result => {
+        if (active && result) setWidgetSyncError("");
+      })
+      .catch(error => {
+        console.error("Snapshot widget SYNC tidak dapat diperbarui.", error);
+        if (active) setWidgetSyncError("Widget belum tersinkron. Buka kembali aplikasi untuk mencoba lagi.");
+      });
+
+    return () => { active = false; };
+  }, [data, currentDate, storageError]);
+
+  useEffect(() => {
+    let active = true;
+    let listener: import("@capacitor/core").PluginListenerHandle | undefined;
+    const openFromWidget = (url: string) => {
+      let destination: URL;
+      try {
+        destination = new URL(url);
+      } catch (error) {
+        console.error("Deep link dari widget tidak valid.", error);
+        return;
+      }
+
+      if (destination.protocol !== "sync:") return;
+      if (destination.hostname === "tasks" && destination.pathname === "/new") {
+        setPage("Aktivitas");
+        setShowTask(true);
+      } else if (destination.hostname === "calendar" || destination.hostname === "reminders") {
+        setPage("Kalender");
+        if (destination.hostname === "reminders" && destination.pathname === "/new") setShowReminder(true);
+      } else if (destination.hostname === "finance") {
+        setPage("Keuangan");
+        if (destination.pathname === "/new") setShowTransaction(true);
+      } else if (destination.hostname === "tasks") {
+        setPage("Aktivitas");
+      }
+    };
+
+    NativeApp.addListener("appUrlOpen", event => openFromWidget(event.url))
+      .then(handle => {
+        if (active) listener = handle;
+        else void handle.remove();
+      })
+      .catch(error => console.error("Listener aksi widget tidak dapat dipasang.", error));
+    if (Capacitor.isNativePlatform()) {
+      NativeApp.getLaunchUrl()
+        .then(result => { if (result?.url) openFromWidget(result.url); })
+        .catch(error => console.error("Deep link awal dari widget tidak dapat dibaca.", error));
+    }
+    return () => {
+      active = false;
+      void listener?.remove();
+    };
+  }, []);
+
+  useEffect(() => {
     const snapshot: ProgressSnapshot = {
       date: currentDate,
       assets: currentAssetValue(data, currentDate),
@@ -594,6 +682,19 @@ export default function App() {
   const monthExpense = data.transactions.filter(t => t.type === "expense" && t.date.slice(0, 7) === currentDate.slice(0, 7)).reduce((s, t) => s + t.amount, 0);
   const completedTasks = data.tasks.filter(t => t.done).length;
   const pendingTasks = data.tasks.filter(t => !t.done).length;
+  const prioritizedTaskList = prioritizeWidgetTasks(
+    data.tasks.map(task => ({
+      id: task.id,
+      title: task.title,
+      dueDate: task.date,
+      completed: task.done,
+      priority: task.priority,
+      completedOn: task.completedOn
+    })),
+    data.widgetConfiguration.taskPriorities,
+    currentDate,
+    data.widgetConfiguration.smartPriorityEnabled
+  );
   const outstandingDebts = data.debts.filter(debt => debt.status !== "Lunas");
   const unpaidOwed = outstandingDebts.filter(debt => debt.type === "utang").reduce((sum, debt) => sum + debt.amount, 0);
   const unpaidReceivable = outstandingDebts.filter(debt => debt.type === "piutang").reduce((sum, debt) => sum + debt.amount, 0);
@@ -615,6 +716,39 @@ export default function App() {
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
     setData(current => ({ ...current, preferences: { ...current.preferences, lastBackupAt: backup.exportedAt } }));
   }
+  function exportExcel() {
+    const sheets = [
+      { name: "Transaksi", headers: ["ID", "Judul", "Jumlah", "Jenis", "Kategori", "Tanggal", "Akun"], rows: data.transactions.map(item => [item.id, item.title, item.amount, item.type, item.category, item.date, item.account]) },
+      { name: "Utang Piutang", headers: ["ID", "Judul", "Jumlah", "Jenis", "Jatuh Tempo", "Status"], rows: data.debts.map(item => [item.id, item.title, item.amount, item.type, item.dueDate, item.status]) },
+      { name: "Tugas", headers: ["ID", "Judul", "Tanggal", "Selesai", "Prioritas", "Selesai Pada"], rows: data.tasks.map(item => [item.id, item.title, item.date, item.done, item.priority, item.completedOn]) },
+      { name: "Kebiasaan", headers: ["ID", "Judul", "Selesai", "Selesai Pada", "Tanggal Selesai"], rows: data.habits.map(item => [item.id, item.title, item.done, item.completedOn, item.completionDates?.join(", ")]) },
+      { name: "Target", headers: ["ID", "Judul", "Target", "Terkumpul", "Status"], rows: data.goals.map(item => [item.id, item.title, item.target, item.saved, item.status]) },
+      { name: "Pengingat", headers: ["ID", "Judul", "Tanggal"], rows: data.reminders.map(item => [item.id, item.title, item.date]) },
+      { name: "Akun", headers: ["Nama", "Saldo"], rows: data.accounts.map(item => [item.name, item.balance]) },
+      { name: "Anggaran", headers: ["Anggaran Bulanan"], rows: [[data.budget]] },
+      { name: "Notifikasi", headers: ["ID", "Kategori", "Judul", "Pesan", "Prioritas", "Dibuat Pada", "Sudah Dibaca"], rows: data.notifications.map(item => [item.id, item.category, item.title, item.message, item.priority, item.createdAt, item.read]) },
+      { name: "Pengaturan Notifikasi", headers: ["Notifikasi Push", "Waktu Pengingat", "Hari Sebelumnya", "Ambang Anggaran (%)"], rows: [[data.notificationSettings.pushEnabled, data.notificationSettings.reminderTime, data.notificationSettings.advanceDays, data.notificationSettings.budgetThreshold]] },
+      { name: "Preferensi", headers: ["Nama", "Email", "Tema", "Aksen", "Kunci Otomatis (menit)", "Backup Terakhir"], rows: [[data.preferences.name, data.preferences.email, data.preferences.theme, data.preferences.accent, data.preferences.autoLockMinutes, data.preferences.lastBackupAt]] },
+      { name: "Riwayat Progres", headers: ["Tanggal", "Aset", "Tabungan Target", "Target Tabungan", "Tugas Selesai", "Kebiasaan Selesai", "Total Kebiasaan"], rows: data.progressSnapshots.map(item => [item.date, item.assets, item.goalsSaved, item.goalsTarget, item.completedTasks, item.habitsCompleted, item.habitsTotal]) },
+      { name: "Konfigurasi Widget", headers: ["Data Konfigurasi"], rows: [[JSON.stringify(data.widgetConfiguration)]] }
+    ];
+
+    try {
+      const workbook = createExcelWorkbook(sheets);
+      const excelBytes = new Uint8Array(workbook.byteLength);
+      excelBytes.set(workbook);
+      const blob = new Blob([excelBytes.buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `SYNC-data-${currentDate}.xlsx`;
+      a.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      console.error("Data SYNC tidak dapat diekspor ke Excel.", error);
+      alert(error instanceof Error ? `Ekspor Excel gagal: ${error.message}` : "Ekspor Excel gagal.");
+    }
+  }
   function importData(file?: File) {
     if (!file) return;
     const reader = new FileReader();
@@ -635,7 +769,8 @@ export default function App() {
           goals: normalizeGoals(restored.goals),
           notifications: Array.isArray(restored.notifications) ? restored.notifications : [],
           notificationSettings: { ...initial.notificationSettings, ...restored.notificationSettings },
-          preferences: { ...defaultPreferences, ...restored.preferences }
+          preferences: { ...defaultPreferences, ...restored.preferences },
+          widgetConfiguration: normalizeWidgetConfiguration(restored.widgetConfiguration)
         });
         setImportError("");
         alert("Backup SYNC berhasil dipulihkan. PIN aplikasi tetap mengikuti perangkat ini.");
@@ -708,6 +843,7 @@ export default function App() {
     preserveStoredData.current = false;
     setStorageError("");
     skipNextDataSave.current = true;
+    storageWriteSucceeded.current = true;
     setData(initial);
     setPinCredential(null);
     setIsLocked(false);
@@ -797,6 +933,7 @@ export default function App() {
 
       {page === "Pengaturan" && <SettingsCenter
         preferences={data.preferences}
+        widgetSyncError={widgetSyncError}
         notificationSettings={data.notificationSettings}
         pinEnabled={Boolean(pinCredential)}
         sessionStartedAt={sessionStartedAt}
@@ -808,8 +945,19 @@ export default function App() {
         onSetPin={savePin}
         onLockSession={() => setIsLocked(true)}
         onExport={exportData}
+        onExportExcel={exportExcel}
         onImport={importData}
         onDelete={() => setShowDeleteConfirmation(true)}
+        onOpenWidget={() => setPage("Kustomisasi Widget")}
+      />}
+
+      {page === "Kustomisasi Widget" && <WidgetCustomization
+        configuration={data.widgetConfiguration}
+        sourceData={data}
+        now={now}
+        syncError={widgetSyncError}
+        onBack={() => setPage("Pengaturan")}
+        onChange={widgetConfiguration => setData(current => ({ ...current, widgetConfiguration }))}
       />}
 
       {page === "Laporan" && <ProgressReport data={data} now={now} period={reportPeriod} onPeriodChange={setReportPeriod}/>}
@@ -847,7 +995,7 @@ export default function App() {
         <div className="panel"><div className="panel-head"><div><h3>Daftar utang & piutang</h3><p>{data.debts.length} catatan tersimpan</p></div></div>{data.debts.length===0?<Empty text="Belum ada catatan. Tambahkan utang atau piutang untuk mulai memantaunya."/>:<div className="table-wrap"><table className="debt-table"><thead><tr><th>Catatan</th><th>Jenis</th><th>Jatuh tempo</th><th>Nominal</th><th>Status pembayaran</th><th></th></tr></thead><tbody>{[...data.debts].sort((a,b)=>a.dueDate.localeCompare(b.dueDate)).map(debt=><tr key={debt.id}><td><b>{debt.title}</b></td><td><span className={`tag ${debt.type==="utang"?"expense":"income"}`}>{debt.type==="utang"?"Utang":"Piutang"}</span></td><td className={debt.status!=="Lunas"&&debt.dueDate<currentDate?"red":""}>{debt.dueDate}{debt.status!=="Lunas"&&debt.dueDate<currentDate&&<small>Lewat jatuh tempo</small>}</td><td>{money(debt.amount)}</td><td><select className={`debt-status ${debt.status==="Lunas"?"paid":""}`} aria-label={`Status pembayaran ${debt.title}`} value={debt.status} onChange={e=>setData(d=>({...d,debts:d.debts.map(item=>item.id===debt.id?{...item,status:e.target.value as Debt["status"]}:item)}))}><option>Belum lunas</option><option>Lunas</option></select></td><td><button className="delete-btn" onClick={()=>setData(d=>({...d,debts:d.debts.filter(item=>item.id!==debt.id)}))}>Hapus</button></td></tr>)}</tbody></table></div>}</div>
       </section>}
 
-      {page === "Aktivitas" && <section className="content"><div className="section-actions"><div><h2>Daftar aktivitas</h2><p>Kelola pekerjaan dan prioritasmu.</p></div><button className="primary" onClick={()=>setShowTask(true)}>＋ Tambah tugas</button></div><div className="panel">{data.tasks.length===0?<Empty text="Belum ada tugas yang dibuat."/>:data.tasks.map(t=><div className="task-full" key={t.id}><input type="checkbox" checked={t.done} onChange={e=>setData(d=>({...d,tasks:d.tasks.map(x=>x.id===t.id?{...x,done:e.target.checked,completedOn:e.target.checked?currentDate:undefined}:x)}))}/><div className={t.done?"done":""}><b>{t.title}</b><small>{t.date||"Tanpa tanggal"}</small></div><span className={`priority ${t.priority.toLowerCase()}`}>{t.priority}</span><button className="delete-btn" onClick={()=>setData(d=>({...d,tasks:d.tasks.filter(x=>x.id!==t.id)}))}>Hapus</button></div>)}</div></section>}
+      {page === "Aktivitas" && <section className="content"><div className="section-actions"><div><h2>Daftar aktivitas</h2><p>Kelola pekerjaan dan prioritasmu.</p></div><button className="primary" onClick={()=>setShowTask(true)}>＋ Tambah tugas</button></div><div className="panel">{data.tasks.length===0?<Empty text="Belum ada tugas yang dibuat."/>:[...prioritizedTaskList, ...data.tasks.filter(task=>task.done).map(task=>({task:{id:task.id,title:task.title,dueDate:task.date,completed:true,priority:task.priority,completedOn:task.completedOn},reason:"Selesai",pinned:false,locked:false}))].map(({task:t, reason, pinned, locked})=><div className="task-full" key={t.id}><input type="checkbox" checked={t.completed} onChange={e=>setData(d=>({...d,tasks:d.tasks.map(x=>x.id===t.id?{...x,done:e.target.checked,completedOn:e.target.checked?currentDate:undefined}:x)}))}/><div className={t.completed?"done":""}><b>{t.title}</b><small>{t.dueDate||"Tanpa tanggal"}{data.widgetConfiguration.smartPriorityEnabled ? ` · ${reason}` : ""}</small></div><span className={`priority ${t.priority.toLowerCase()}`}>{pinned?"Disematkan · ":""}{t.priority}{locked?" · Terkunci":""}</span><button className="delete-btn" onClick={()=>setData(d=>({...d,tasks:d.tasks.filter(x=>x.id!==t.id)}))}>Hapus</button></div>)}</div></section>}
 
       {page === "Kalender" && <section className="content"><div className="section-actions"><div><h2>Kalender & pengingat</h2><p>Agenda yang perlu kamu ingat.</p></div><button className="primary" onClick={()=>setShowReminder(true)}>＋ Buat pengingat</button></div><div className="panel"><h3>Agenda tugas</h3>{data.tasks.filter(t=>t.date).sort((a,b)=>a.date.localeCompare(b.date)).map(t=><div className="task-line" key={t.id}><span className="calendar-date">{t.date.slice(8,10)}</span><div><b>{t.title}</b><small>{t.date}</small></div></div>)}{data.tasks.filter(t=>t.date).length===0&&<Empty text="Belum ada agenda bertanggal."/>}</div><div className="panel"><h3>Pengingat tersimpan</h3>{data.reminders.map(r=><div className="task-line" key={r.id}><span className="task-dot purple"></span><div><b>{r.title}</b><small>{new Date(r.date).toLocaleString("id-ID")}</small></div><button className="text-btn" onClick={()=>notify(r.title,"Ini pengingat dari SYNC.")}>Uji notifikasi</button></div>)}{data.reminders.length===0&&<Empty text="Belum ada pengingat."/>}</div></section>}
 
@@ -956,8 +1104,9 @@ function NotificationCenter({ notifications, settings, unreadOnly, onFilterChang
   </section>;
 }
 
-function SettingsCenter({ preferences, notificationSettings, pinEnabled, sessionStartedAt, lastBackupAt, importError, importRef, onPreferencesChange, onNotificationChange, onSetPin, onLockSession, onExport, onImport, onDelete }: {
+function SettingsCenter({ preferences, notificationSettings, pinEnabled, sessionStartedAt, lastBackupAt, importError, importRef, onPreferencesChange, onNotificationChange, onSetPin, onLockSession, onExport, onExportExcel, onImport, onDelete, onOpenWidget, widgetSyncError }: {
   preferences: UserPreferences;
+  widgetSyncError: string;
   notificationSettings: NotificationSettings;
   pinEnabled: boolean;
   sessionStartedAt: Date;
@@ -969,8 +1118,10 @@ function SettingsCenter({ preferences, notificationSettings, pinEnabled, session
   onSetPin: (currentPin: string, nextPin: string) => Promise<boolean>;
   onLockSession: () => void;
   onExport: () => void;
+  onExportExcel: () => void;
   onImport: (file?: File) => void;
   onDelete: () => void;
+  onOpenWidget: () => void;
 }) {
   const [currentPin, setCurrentPin] = useState("");
   const [nextPin, setNextPin] = useState("");
@@ -1023,6 +1174,12 @@ function SettingsCenter({ preferences, notificationSettings, pinEnabled, session
 
   return <section className="content settings-center">
     <div className="section-actions"><div><h2>Pengaturan</h2><p>Kelola profil, tampilan, keamanan, dan data SYNC.</p></div></div>
+
+    <div className="panel settings-panel widget-settings-entry">
+      <div className="panel-head"><div><h3>Widget Customization</h3><p>Atur modul, prioritas, privasi, dan tampilan Home Screen Widget.</p></div><button className="primary" type="button" onClick={onOpenWidget}>Atur widget ↗</button></div>
+      <p className="settings-help">Pengaturan widget tersimpan otomatis bersama data SYNC di perangkat ini.</p>
+      {widgetSyncError && <p className="widget-sync-error" role="alert">{widgetSyncError}</p>}
+    </div>
 
     <div className="panel settings-panel">
       <div className="panel-head"><div><h3>Profil pengguna</h3><p>Informasi profil tersimpan hanya di browser ini.</p></div><div className="avatar settings-avatar">{getInitials(preferences.name)}</div></div>
@@ -1078,8 +1235,8 @@ function SettingsCenter({ preferences, notificationSettings, pinEnabled, session
     </div>
 
     <div className="panel settings-panel">
-      <div className="panel-head"><div><h3>Backup & restore</h3><p>Ekspor semua data SYNC dalam format JSON untuk dipulihkan nanti.</p></div></div>
-      <div className="backup-actions"><button className="primary" type="button" onClick={onExport}>↓ Ekspor backup JSON</button><button className="settings-secondary-button" type="button" onClick={() => { if (importRef.current) importRef.current.value = ""; importRef.current?.click(); }}>↑ Pulihkan dari JSON</button><input ref={importRef} type="file" accept="application/json,.json" hidden onChange={event => onImport(event.target.files?.[0])}/></div>
+      <div className="panel-head"><div><h3>Ekspor & backup</h3><p>Unduh data SYNC dalam format Excel untuk dibuka di spreadsheet. Gunakan backup JSON untuk memulihkan data ke aplikasi.</p></div></div>
+      <div className="backup-actions"><button className="primary" type="button" onClick={onExportExcel}>↓ Ekspor ke Excel</button><button className="settings-secondary-button" type="button" onClick={onExport}>↓ Backup JSON</button><button className="settings-secondary-button" type="button" onClick={() => { if (importRef.current) importRef.current.value = ""; importRef.current?.click(); }}>↑ Pulihkan dari JSON</button><input ref={importRef} type="file" accept="application/json,.json" hidden onChange={event => onImport(event.target.files?.[0])}/></div>
       <p className="settings-help">{lastBackupAt ? `Backup terakhir: ${new Date(lastBackupAt).toLocaleString("id-ID")}.` : "Belum ada backup yang dibuat dari perangkat ini."} PIN tidak disertakan dalam file backup dan tetap mengikuti perangkat tempat aplikasi dipulihkan.</p>
       {importError && <p className="settings-feedback" role="alert">{importError}</p>}
     </div>

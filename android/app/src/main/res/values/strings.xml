@@ -1,0 +1,13 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">SYNC Personal Life</string>
+    <string name="title_activity_main">SYNC Personal Life</string>
+    <string name="package_name">com.sync.personal</string>
+    <string name="custom_url_scheme">com.sync.personal</string>
+    <string name="widget_name">SYNC Life Widget</string>
+    <string name="widget_description">Agenda dan prioritas SYNC dari data lokal perangkat.</string>
+    <string name="widget_add_task">Tambah tugas SYNC</string>
+    <string name="widget_open_calendar">Buka kalender SYNC</string>
+    <string name="widget_open_finance">Buka keuangan SYNC</string>
+    <string name="widget_open_reminders">Buka pengingat SYNC</string>
+</resources>
